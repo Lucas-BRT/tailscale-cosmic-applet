@@ -51,6 +51,7 @@ pub struct AppModel {
     pub is_refreshing: bool,
     /// Value last copied to the clipboard, kept briefly to confirm the action.
     pub copied: Option<String>,
+    copy_request_id: u64,
     /// Latency checks by peer IP.
     pub pings: HashMap<String, PingState>,
     /// Currently expanded peer ID for actions and detailed metrics.
@@ -67,6 +68,7 @@ pub struct AppModel {
     expansions: Vec<DisclosureMotion>,
     copy_motions: Vec<CopyMotion>,
     refresh_spin_started: Option<Instant>,
+    refresh_spin_settle: Option<(Instant, f32)>,
     refresh_confirmed: bool,
     refresh_feedback_id: u64,
     frame_time: Option<Instant>,
@@ -82,6 +84,7 @@ impl Default for AppModel {
             pending: None,
             is_refreshing: false,
             copied: None,
+            copy_request_id: 0,
             pings: HashMap::new(),
             expanded_peer: None,
             search_query: String::new(),
@@ -93,6 +96,7 @@ impl Default for AppModel {
             expansions: Vec::new(),
             copy_motions: Vec::new(),
             refresh_spin_started: None,
+            refresh_spin_settle: None,
             refresh_confirmed: false,
             refresh_feedback_id: 0,
             frame_time: None,
@@ -110,6 +114,7 @@ pub enum PingState {
 const EXPANSION_DURATION: Duration = Duration::from_millis(240);
 const COPY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const REFRESH_FEEDBACK_DURATION: Duration = Duration::from_millis(420);
+const REFRESH_SETTLE_DURATION: Duration = Duration::from_millis(160);
 const REFRESH_CONFIRMED_HOLD: Duration = Duration::from_millis(550);
 const MIN_PEERS_FOR_SEARCH: usize = 3;
 
@@ -247,7 +252,7 @@ pub enum Message {
     SetConnected(bool),
     CommandFinished(Result<(), String>),
     Copy(String),
-    ClearCopied(String),
+    ClearCopied(String, u64),
     ClearRefreshConfirmed(u64),
     Ping(String),
     PingDone(String, Result<(u32, bool), String>),
@@ -280,6 +285,7 @@ impl AppModel {
             self.expansions.clear();
             self.copy_motions.clear();
             self.refresh_spin_started = None;
+            self.refresh_spin_settle = None;
             self.frame_time = None;
         }
     }
@@ -458,29 +464,36 @@ impl AppModel {
         if !self.animations_enabled() {
             return 0.0;
         }
-        let Some(started_at) = self.refresh_spin_started else {
-            return 0.0;
-        };
-        let progress = now
-            .saturating_duration_since(started_at)
-            .div_duration_f32(REFRESH_FEEDBACK_DURATION)
-            .clamp(0.0, 1.0);
-        disclosure_ease(progress) * std::f32::consts::TAU
+        if let Some(started_at) = self.refresh_spin_started {
+            let turns = now
+                .saturating_duration_since(started_at)
+                .div_duration_f32(REFRESH_FEEDBACK_DURATION);
+            return turns.fract() * std::f32::consts::TAU;
+        }
+        if let Some((started_at, from)) = self.refresh_spin_settle {
+            let progress = now
+                .saturating_duration_since(started_at)
+                .div_duration_f32(REFRESH_SETTLE_DURATION)
+                .clamp(0.0, 1.0);
+            return from + (std::f32::consts::TAU - from) * disclosure_ease(progress);
+        }
+        0.0
     }
 
     fn has_active_animations(&self) -> bool {
         !self.expansions.is_empty()
             || !self.copy_motions.is_empty()
             || self.refresh_spin_started.is_some()
+            || self.refresh_spin_settle.is_some()
     }
 
     fn finish_animations_if_complete(&mut self, now: Instant) {
         self.expansions.retain(|motion| !motion.is_complete(now));
         self.copy_motions.retain(|motion| !motion.is_complete(now));
-        if let Some(started_at) = self.refresh_spin_started
-            && now.saturating_duration_since(started_at) >= REFRESH_FEEDBACK_DURATION
+        if let Some((started_at, _)) = self.refresh_spin_settle
+            && now.saturating_duration_since(started_at) >= REFRESH_SETTLE_DURATION
         {
-            self.refresh_spin_started = None;
+            self.refresh_spin_settle = None;
         }
         self.frame_time = self.has_active_animations().then_some(now);
     }
@@ -492,6 +505,7 @@ impl AppModel {
         self.expanded_peer = None;
         self.expansions.clear();
         self.refresh_spin_started = None;
+        self.refresh_spin_settle = None;
         self.refresh_confirmed = false;
         self.frame_time = None;
         self.search_query.clear();
@@ -627,7 +641,21 @@ impl AppModel {
             activity_bar,
             // Stable tree position before conditional banners/body so diffing preserves state.
             FrameDriver {
-                active: self.animations_enabled() && self.has_active_animations(),
+                continuous: self.animations_enabled() && self.refresh_spin_started.is_some(),
+                deadline: self
+                    .animations_enabled()
+                    .then(|| {
+                        self.expansions
+                            .iter()
+                            .map(|m| m.started_at + m.duration)
+                            .chain(self.copy_motions.iter().map(|m| m.started_at + m.duration))
+                            .chain(
+                                self.refresh_spin_settle
+                                    .map(|(start, _)| start + REFRESH_SETTLE_DURATION),
+                            )
+                            .max()
+                    })
+                    .flatten(),
             }
             .into(),
         ];
@@ -915,7 +943,9 @@ impl AppModel {
 
         let retry_btn = widget::button::standard(fl!("retry"))
             .leading_icon(widget::icon::from_name("view-refresh-symbolic"))
-            .on_press(Message::Refresh);
+            .on_press_maybe(
+                (!self.is_refreshing && self.pending.is_none()).then_some(Message::Refresh),
+            );
 
         let content = widget::column::with_capacity(2)
             .spacing(spacing.space_xs)
@@ -950,7 +980,9 @@ impl AppModel {
 
         let sign_in_btn = widget::button::suggested(fl!("sign-in"))
             .leading_icon(widget::icon::from_name("web-browser-symbolic"))
-            .on_press(Message::SignIn);
+            .on_press_maybe(
+                (!self.is_refreshing && self.pending.is_none()).then_some(Message::SignIn),
+            );
 
         let content = widget::column::with_capacity(2)
             .spacing(spacing.space_xs)
@@ -1026,7 +1058,7 @@ impl AppModel {
             .into()
     }
 
-    fn footer_view(&self, muted_color: Color) -> Element<'_, Message> {
+    fn footer_view(&self, _muted_color: Color) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let row = widget::row::with_children(vec![
             widget::icon::from_name("web-browser-symbolic")
@@ -1036,16 +1068,11 @@ impl AppModel {
             self.body_text(fl!("admin-console"))
                 .width(Length::Fill)
                 .into(),
-            widget::icon::from_name("go-next-symbolic")
-                .size(16)
-                .symbolic(true)
-                .into(),
         ])
         .spacing(spacing.space_xs)
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-        let _ = muted_color;
         widget::container(
             cosmic::applet::menu_button(row)
                 .class(applet_menu_row_style(footer_corner_radii(
@@ -1072,7 +1099,6 @@ impl AppModel {
         let mut row_index = 0;
 
         if !status.hostname.is_empty() {
-            let is_copied = self.copied.as_deref() == Some(&status.hostname);
             let mut identity = widget::column::with_capacity(2)
                 .spacing(2)
                 .push(self.body_strong(status.hostname.clone()));
@@ -1108,21 +1134,17 @@ impl AppModel {
                 )))
                 .padding([spacing.space_xxs, spacing.space_s])
                 .width(Length::Fill)
-                .on_press_maybe((!is_copied).then(|| Message::Copy(status.hostname.clone())));
+                .on_press(Message::Copy(status.hostname.clone()));
             row_index += 1;
 
-            if is_copied {
-                rows.push(host_button.into());
-            } else {
-                rows.push(
-                    widget::tooltip(
-                        host_button,
-                        self.caption_text(fl!("copy-name")),
-                        widget::tooltip::Position::Bottom,
-                    )
-                    .into(),
-                );
-            }
+            rows.push(
+                widget::tooltip(
+                    host_button,
+                    self.caption_text(fl!("copy-name")),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into(),
+            );
         }
 
         for ip in &status.ips {
@@ -1134,7 +1156,6 @@ impl AppModel {
             } else {
                 fl!("ipv4")
             };
-            let is_copied = self.copied.as_deref() == Some(ip.as_str());
 
             let ip_text_col = widget::column::with_capacity(2)
                 .spacing(1)
@@ -1162,21 +1183,17 @@ impl AppModel {
                 )))
                 .padding([spacing.space_xxs, spacing.space_s])
                 .width(Length::Fill)
-                .on_press_maybe((!is_copied).then(|| Message::Copy(ip.clone())));
+                .on_press(Message::Copy(ip.clone()));
             row_index += 1;
 
-            if is_copied {
-                rows.push(ip_button.into());
-            } else {
-                rows.push(
-                    widget::tooltip(
-                        ip_button,
-                        self.caption_text(fl!("copy-ip")),
-                        widget::tooltip::Position::Bottom,
-                    )
-                    .into(),
-                );
-            }
+            rows.push(
+                widget::tooltip(
+                    ip_button,
+                    self.caption_text(fl!("copy-ip")),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into(),
+            );
         }
 
         let card = widget::container(widget::column::with_children(rows).spacing(0))
@@ -1460,7 +1477,7 @@ impl AppModel {
             widget::button::custom(content)
                 .padding(0)
                 .class(faded_standard_button(content_alpha))
-                .on_press_maybe((!is_copied && enabled).then(|| Message::Copy(value.to_owned())))
+                .on_press_maybe(enabled.then(|| Message::Copy(value.to_owned())))
                 .into()
         };
 
@@ -1504,17 +1521,14 @@ impl AppModel {
         .spacing(0)
         .width(Length::Fill);
 
-        let target_height = self.drawer_target_height(&spacing, !meta_parts.is_empty());
-        let container = widget::container(inner).width(Length::Fill);
-        // Only clamp height while animating; settled drawers size naturally (WCAG 1.4.4).
-        if reveal < 0.999 {
-            container
-                .max_height((target_height * reveal).max(0.0))
+        MeasuredReveal {
+            content: widget::container(inner)
+                .width(Length::Fill)
                 .clip(true)
-                .into()
-        } else {
-            container.into()
+                .into(),
+            reveal,
         }
+        .into()
     }
 
     /// Single peer row with a smooth inline actions drawer.
@@ -1623,7 +1637,7 @@ impl AppModel {
             .class(applet_menu_row_style(row_corner_radii(
                 theme.corner_radii.radius_s,
                 is_first,
-                is_last && !is_expanded,
+                is_last && !is_expanded && reveal <= 0.001,
             )))
             .width(Length::Fill)
             .padding([spacing.space_xs, spacing.space_s])
@@ -2057,6 +2071,7 @@ impl cosmic::Application for AppModel {
                 if self.animations_enabled() {
                     let now = Instant::now();
                     self.refresh_spin_started = Some(now);
+                    self.refresh_spin_settle = None;
                     self.frame_time = Some(now);
                     self.refresh_confirmed = false;
                     return fetch;
@@ -2088,6 +2103,13 @@ impl cosmic::Application for AppModel {
                 // Reject stale async results so a slow poll never overwrites newer state.
                 if req_id != self.status_request_id {
                     return Task::none();
+                }
+                if self.refresh_spin_started.is_some() {
+                    let now = Instant::now();
+                    let angle = self.refresh_spin_radians(now);
+                    self.refresh_spin_started = None;
+                    self.refresh_spin_settle = Some((now, angle));
+                    self.frame_time = Some(now);
                 }
                 self.is_refreshing = false;
                 match result {
@@ -2123,6 +2145,8 @@ impl cosmic::Application for AppModel {
             Message::TogglePopup => return self.toggle_popup(),
             Message::Copy(text) => {
                 let now = Instant::now();
+                self.copy_request_id = self.copy_request_id.wrapping_add(1);
+                let request_id = self.copy_request_id;
                 let prev = self.copied.clone().filter(|p| p != &text);
                 let prev_from = prev.as_deref().map(|p| self.copy_progress(p, now));
                 let next_from = self.copy_progress(&text, now);
@@ -2145,13 +2169,13 @@ impl cosmic::Application for AppModel {
                             tokio::time::sleep(Duration::from_millis(1600)).await;
                             text
                         },
-                        Message::ClearCopied,
+                        move |text| Message::ClearCopied(text, request_id),
                     )
                     .map(cosmic::Action::App),
                 ]);
             }
-            Message::ClearCopied(text) => {
-                if self.copied.as_ref() == Some(&text) {
+            Message::ClearCopied(text, request_id) => {
+                if self.copy_request_id == request_id && self.copied.as_ref() == Some(&text) {
                     let now = Instant::now();
                     let from = self.copy_progress(&text, now);
                     self.copied = None;
@@ -2205,9 +2229,14 @@ impl cosmic::Application for AppModel {
                     self.search_query.clear();
                 } else if let Some(peer_id) = self.expanded_peer.clone() {
                     self.toggle_peer_expansion(peer_id);
+                } else if self.popup.is_some() {
+                    return self.toggle_popup();
                 }
             }
             Message::SignIn => {
+                if self.is_refreshing || self.pending.is_some() {
+                    return Task::none();
+                }
                 if let Some(url) = self
                     .status
                     .as_ref()
@@ -2297,11 +2326,186 @@ fn peer_has_meta(peer: &Peer) -> bool {
     has_os || has_dns
 }
 
+/// Clips a drawer to a fraction of its measured natural height.
+struct MeasuredReveal<'a> {
+    content: Element<'a, Message>,
+    reveal: f32,
+}
+
+impl cosmic::iced::advanced::Widget<Message, cosmic::Theme, cosmic::Renderer>
+    for MeasuredReveal<'_>
+{
+    fn tag(&self) -> cosmic::iced::advanced::widget::tree::Tag {
+        self.content.as_widget().tag()
+    }
+    fn state(&self) -> cosmic::iced::advanced::widget::tree::State {
+        self.content.as_widget().state()
+    }
+    fn children(&self) -> Vec<cosmic::iced::advanced::widget::Tree> {
+        self.content.as_widget().children()
+    }
+    fn diff(&mut self, tree: &mut cosmic::iced::advanced::widget::Tree) {
+        self.content.as_widget_mut().diff(tree);
+    }
+    fn size(&self) -> cosmic::iced::Size<Length> {
+        cosmic::iced::Size::new(Length::Fill, Length::Shrink)
+    }
+    fn layout(
+        &mut self,
+        tree: &mut cosmic::iced::advanced::widget::Tree,
+        renderer: &cosmic::Renderer,
+        limits: &Limits,
+    ) -> cosmic::iced::advanced::layout::Node {
+        let child = self.content.as_widget_mut().layout(tree, renderer, limits);
+        let size = child.size();
+        cosmic::iced::advanced::layout::Node::with_children(
+            cosmic::iced::Size::new(size.width, size.height * self.reveal.clamp(0.0, 1.0)),
+            vec![child],
+        )
+    }
+    fn operate(
+        &mut self,
+        tree: &mut cosmic::iced::advanced::widget::Tree,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        renderer: &cosmic::Renderer,
+        operation: &mut dyn cosmic::iced::advanced::widget::Operation,
+    ) {
+        self.content.as_widget_mut().operate(
+            tree,
+            layout
+                .children()
+                .next()
+                .expect("drawer content")
+                .with_virtual_offset(layout.virtual_offset()),
+            renderer,
+            operation,
+        );
+    }
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut cosmic::iced::advanced::widget::Tree,
+        layout: cosmic::iced::advanced::Layout<'b>,
+        renderer: &cosmic::Renderer,
+        viewport: &cosmic::iced::Rectangle,
+        translation: cosmic::iced::Vector,
+    ) -> Option<
+        cosmic::iced::advanced::overlay::Element<'b, Message, cosmic::Theme, cosmic::Renderer>,
+    > {
+        if self.reveal < 0.999 {
+            return None;
+        }
+        self.content.as_widget_mut().overlay(
+            tree,
+            layout
+                .children()
+                .next()
+                .expect("drawer content")
+                .with_virtual_offset(layout.virtual_offset()),
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+    fn update(
+        &mut self,
+        tree: &mut cosmic::iced::advanced::widget::Tree,
+        event: &Event,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        cursor: cosmic::iced::mouse::Cursor,
+        renderer: &cosmic::Renderer,
+        clipboard: &mut dyn cosmic::iced::advanced::Clipboard,
+        shell: &mut cosmic::iced::advanced::Shell<'_, Message>,
+        viewport: &cosmic::iced::Rectangle,
+    ) {
+        if let Some(visible) = layout.bounds().intersection(viewport) {
+            let cursor = if cursor.is_over(visible) {
+                cursor
+            } else {
+                cosmic::iced::mouse::Cursor::Unavailable
+            };
+            self.content.as_widget_mut().update(
+                tree,
+                event,
+                layout
+                    .children()
+                    .next()
+                    .expect("drawer content")
+                    .with_virtual_offset(layout.virtual_offset()),
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                &visible,
+            );
+        }
+    }
+    fn draw(
+        &self,
+        tree: &cosmic::iced::advanced::widget::Tree,
+        renderer: &mut cosmic::Renderer,
+        theme: &cosmic::Theme,
+        style: &cosmic::iced::advanced::renderer::Style,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        cursor: cosmic::iced::mouse::Cursor,
+        viewport: &cosmic::iced::Rectangle,
+    ) {
+        if let Some(visible) = layout.bounds().intersection(viewport) {
+            use cosmic::iced::advanced::Renderer as _;
+            renderer.with_layer(visible, |renderer| {
+                self.content.as_widget().draw(
+                    tree,
+                    renderer,
+                    theme,
+                    style,
+                    layout
+                        .children()
+                        .next()
+                        .expect("drawer content")
+                        .with_virtual_offset(layout.virtual_offset()),
+                    cursor,
+                    &visible,
+                );
+            });
+        }
+    }
+    fn mouse_interaction(
+        &self,
+        tree: &cosmic::iced::advanced::widget::Tree,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        cursor: cosmic::iced::mouse::Cursor,
+        viewport: &cosmic::iced::Rectangle,
+        renderer: &cosmic::Renderer,
+    ) -> cosmic::iced::mouse::Interaction {
+        layout.bounds().intersection(viewport).map_or(
+            cosmic::iced::mouse::Interaction::None,
+            |visible| {
+                self.content.as_widget().mouse_interaction(
+                    tree,
+                    layout
+                        .children()
+                        .next()
+                        .expect("drawer content")
+                        .with_virtual_offset(layout.virtual_offset()),
+                    cursor,
+                    &visible,
+                    renderer,
+                )
+            },
+        )
+    }
+}
+impl<'a> From<MeasuredReveal<'a>> for Element<'a, Message> {
+    fn from(value: MeasuredReveal<'a>) -> Self {
+        Self::new(value)
+    }
+}
+
 /// Zero-size leaf widget that drives popup animations synchronously on each
 /// Wayland `RedrawRequested(now)` before `interface.draw()`, avoiding both the
 /// 1-vsync lag and multi-window double-ticks of `window::frames()`.
 struct FrameDriver {
-    active: bool,
+    continuous: bool,
+    deadline: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -2356,7 +2560,7 @@ impl cosmic::iced::advanced::Widget<Message, cosmic::Theme, cosmic::Renderer> fo
         shell: &mut cosmic::iced::advanced::Shell<'_, Message>,
         _viewport: &cosmic::iced::Rectangle,
     ) {
-        if !self.active {
+        if !self.continuous && self.deadline.is_none() {
             return;
         }
         if let Event::Window(cosmic::iced::window::Event::RedrawRequested(now)) = event {
@@ -2365,7 +2569,9 @@ impl cosmic::iced::advanced::Widget<Message, cosmic::Theme, cosmic::Renderer> fo
                 state.last_redraw = Some(*now);
                 shell.publish(Message::AnimationFrame(*now));
             }
-            shell.request_redraw();
+            if self.continuous || self.deadline.is_some_and(|deadline| *now < deadline) {
+                shell.request_redraw();
+            }
         }
     }
 }
@@ -2866,6 +3072,40 @@ mod tests {
     }
 
     #[test]
+    fn repeated_copy_ignores_stale_clear_timer() {
+        let mut app = AppModel::default();
+        let value = "100.64.0.1".to_owned();
+        let _ = app.update(Message::Copy(value.clone()));
+        let old_id = app.copy_request_id;
+        let _ = app.update(Message::Copy(value.clone()));
+        let _ = app.update(Message::ClearCopied(value.clone(), old_id));
+        assert_eq!(app.copied.as_deref(), Some(value.as_str()));
+        let _ = app.update(Message::ClearCopied(value, app.copy_request_id));
+        assert!(app.copied.is_none());
+    }
+
+    #[test]
+    fn refresh_spin_settles_only_after_matching_request_completes() {
+        let mut app = AppModel::default();
+        app.set_animations_enabled(true);
+        let _ = app.update(Message::Refresh);
+        let request_id = app.status_request_id;
+        let _ = app.update(Message::StatusLoaded(
+            request_id.wrapping_sub(1),
+            Err("stale".into()),
+        ));
+        assert!(app.refresh_spin_started.is_some());
+        let _ = app.update(Message::StatusLoaded(request_id, Err("failed".into())));
+        assert!(!app.is_refreshing);
+        assert!(app.refresh_spin_started.is_none());
+        let (started, _) = app
+            .refresh_spin_settle
+            .expect("settle starts on completion");
+        app.finish_animations_if_complete(started + super::REFRESH_SETTLE_DURATION);
+        assert!(app.refresh_spin_settle.is_none());
+    }
+
+    #[test]
     fn copy_crossfade_and_refresh_feedback_respect_motion_preference() {
         let mut app = AppModel::default();
         app.set_animations_enabled(true);
@@ -2881,7 +3121,10 @@ mod tests {
         // After the 140 ms fade-in settles, ClearCopied animates 1.0 -> 0.0.
         app.copy_motions.clear();
 
-        let _ = app.update(Message::ClearCopied("100.64.0.1".to_owned()));
+        let _ = app.update(Message::ClearCopied(
+            "100.64.0.1".to_owned(),
+            app.copy_request_id,
+        ));
         assert!(app.copied.is_none());
         assert_eq!(app.copy_motions.len(), 1);
         assert_eq!(
@@ -2889,12 +3132,17 @@ mod tests {
             0.0
         );
 
-        // Manual refresh spins once under motion ON.
+        // Manual refresh continues spinning while the request is in flight.
         let _ = app.update(Message::Refresh);
         assert!(app.refresh_spin_started.is_some());
         assert!(!app.refresh_confirmed);
-        let end_angle = app.refresh_spin_radians(Instant::now() + REFRESH_FEEDBACK_DURATION);
-        assert!((end_angle - std::f32::consts::TAU).abs() < 0.01);
+        let started = app.refresh_spin_started.unwrap();
+        app.finish_animations_if_complete(started + REFRESH_FEEDBACK_DURATION * 2);
+        assert!(app.refresh_spin_started.is_some());
+        let angle = app.refresh_spin_radians(
+            started + REFRESH_FEEDBACK_DURATION * 2 + REFRESH_FEEDBACK_DURATION / 4,
+        );
+        assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 0.01);
 
         // Switching to reduced motion clears in-flight motion cleanly.
         app.set_animations_enabled(false);
@@ -3017,6 +3265,86 @@ mod tests {
     }
 
     #[test]
+    fn escape_closes_popup_when_search_and_drawer_are_clear() {
+        let mut app = AppModel {
+            popup: Some(cosmic::iced::window::Id::unique()),
+            ..Default::default()
+        };
+        let _ = app.update(Message::EscapePressed);
+        assert!(app.popup.is_none());
+        let _ = app.update(Message::EscapePressed);
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn measured_reveal_uses_actual_wrapped_height() {
+        use cosmic::iced::advanced::widget::Tree;
+        use cosmic::iced::{Limits, Pixels, Size};
+        let renderer = cosmic::Renderer::new(cosmic::font::default(), Pixels(14.0));
+        let limits = Limits::new(Size::ZERO, Size::new(160.0, 800.0));
+        let content = "long metadata that wraps across several lines ".repeat(8);
+        let make = |reveal| -> super::Element<'_, Message> {
+            super::MeasuredReveal {
+                content: cosmic::widget::container(cosmic::widget::text(content.clone()))
+                    .width(super::Length::Fill)
+                    .into(),
+                reveal,
+            }
+            .into()
+        };
+        let mut full = make(1.0);
+        let mut full_tree = Tree::new(&full);
+        let full_height = full
+            .as_widget_mut()
+            .layout(&mut full_tree, &renderer, &limits)
+            .size()
+            .height;
+        let mut half = make(0.5);
+        let mut half_tree = Tree::new(&half);
+        let half_height = half
+            .as_widget_mut()
+            .layout(&mut half_tree, &renderer, &limits)
+            .size()
+            .height;
+        assert!(full_height > 50.0);
+        assert!((half_height * 2.0 - full_height).abs() < 0.01);
+    }
+
+    #[test]
+    fn frame_driver_keeps_redrawing_during_an_unfinished_refresh() {
+        use cosmic::iced::advanced::{Layout, Shell, clipboard, widget::Tree};
+        use cosmic::iced::{Event, Limits, Pixels, Rectangle, Size, mouse, window};
+        let renderer = cosmic::Renderer::new(cosmic::font::default(), Pixels(14.0));
+        let viewport = Rectangle::with_size(Size::new(420.0, 680.0));
+        let mut app = AppModel::default();
+        app.set_animations_enabled(true);
+        let _ = app.update(Message::Refresh);
+        let started = app.refresh_spin_started.expect("refresh animation started");
+        let mut element = app.popup_view();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(Size::ZERO, viewport.size()),
+        );
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Window(window::Event::RedrawRequested(
+                started + REFRESH_FEEDBACK_DURATION * 2,
+            )),
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &renderer,
+            &mut clipboard::Null,
+            &mut shell,
+            &viewport,
+        );
+        assert_eq!(shell.redraw_request(), window::RedrawRequest::NextFrame);
+    }
+
+    #[test]
     fn frame_driver_drives_popup_redraws_and_settles_to_wait() {
         use cosmic::iced::advanced::{Layout, Shell, clipboard, widget::Tree};
         use cosmic::iced::{Event, Limits, Pixels, Rectangle, Size, mouse, window};
@@ -3048,13 +3376,13 @@ mod tests {
         app.set_animations_enabled(true);
         app.toggle_peer_expansion("peer-1".to_owned());
         assert!(app.has_active_animations());
+        let t1 = app.expansions[0].started_at + Duration::from_millis(16);
 
         let mut el = app.popup_view();
         let mut tree = Tree::new(&el);
         let mut node = el.as_widget_mut().layout(&mut tree, &renderer, &limits);
 
         // Pass 0 on a mid-animation vsync emits exactly 1 AnimationFrame + NextFrame.
-        let t1 = Instant::now() + Duration::from_millis(16);
         let ev1 = Event::Window(window::Event::RedrawRequested(t1));
         let mut msgs = Vec::new();
         let rr0 = {
@@ -3106,7 +3434,7 @@ mod tests {
         // Final frame after EXPANSION_DURATION settles animations and returns RedrawRequest::Wait.
         let t_end = t1 + EXPANSION_DURATION + Duration::from_millis(10);
         let ev_end = Event::Window(window::Event::RedrawRequested(t_end));
-        {
+        let final_request = {
             let mut shell = Shell::new(&mut msgs);
             el.as_widget_mut().update(
                 &mut tree,
@@ -3118,7 +3446,9 @@ mod tests {
                 &mut shell,
                 &viewport,
             );
-        }
+            shell.redraw_request()
+        };
+        assert_eq!(final_request, window::RedrawRequest::Wait);
         assert_eq!(msgs.len(), 1);
         drop(el);
         for msg in msgs.drain(..) {
