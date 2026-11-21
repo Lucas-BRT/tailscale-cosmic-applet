@@ -25,4 +25,4 @@ cargo test --locked --workspace
 
 ## UI Development
 
-- Use `ferris-atelier` when planning, building, reviewing, or improving the COSMIC UI.
+- Use `rupicola` (`https://github.com/Lucas-BRT/rupicola`) when planning, building, reviewing, or improving the COSMIC UI.
