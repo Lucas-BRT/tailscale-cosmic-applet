@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -eu
+
+cargo fmt --check
+cargo clippy --locked --workspace --all-targets -- -D warnings

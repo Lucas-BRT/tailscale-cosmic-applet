@@ -2,6 +2,7 @@
 name = "tailscale-cosmic-applet"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.99.1"
 license = "GPL-3.0-or-later"
 description = "COSMIC panel applet for local Tailscale connections"
 
@@ -39,8 +40,20 @@ features = [
 
 # Optimize dependencies (tiny-skia, cosmic-text, resvg, libcosmic) in dev builds
 # so `just dev` renders animations at native 60 fps instead of ~14 fps on CPU.
+[profile.dev]
+debug = 0
+
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 16
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
 
 # Uncomment to test a locally-cloned libcosmic
 # [patch.'https://github.com/pop-os/libcosmic']
