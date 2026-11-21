@@ -1304,18 +1304,13 @@ impl AppModel {
         }
 
         match self.pings.get(&peer.ip) {
-            None => widget::tooltip(
-                build_btn(
-                    "network-transmit-receive-symbolic",
-                    fl!("ping"),
-                    default_text,
-                    false,
-                    Some(Message::Ping(peer.ip.clone())),
-                ),
-                widget::text::caption(fl!("ping")),
-                widget::tooltip::Position::Bottom,
-            )
-            .into(),
+            None => build_btn(
+                "network-transmit-receive-symbolic",
+                fl!("ping"),
+                default_text,
+                false,
+                Some(Message::Ping(peer.ip.clone())),
+            ),
             Some(PingState::Pending) => {
                 let btn = build_btn(
                     "network-transmit-receive-symbolic",
