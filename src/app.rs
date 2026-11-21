@@ -3376,13 +3376,13 @@ mod tests {
         app.set_animations_enabled(true);
         app.toggle_peer_expansion("peer-1".to_owned());
         assert!(app.has_active_animations());
+        let t1 = app.expansions[0].started_at + Duration::from_millis(16);
 
         let mut el = app.popup_view();
         let mut tree = Tree::new(&el);
         let mut node = el.as_widget_mut().layout(&mut tree, &renderer, &limits);
 
         // Pass 0 on a mid-animation vsync emits exactly 1 AnimationFrame + NextFrame.
-        let t1 = Instant::now() + Duration::from_millis(16);
         let ev1 = Event::Window(window::Event::RedrawRequested(t1));
         let mut msgs = Vec::new();
         let rr0 = {
