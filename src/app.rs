@@ -629,7 +629,20 @@ impl AppModel {
             activity_bar,
             // Stable tree position before conditional banners/body so diffing preserves state.
             FrameDriver {
-                active: self.animations_enabled() && self.has_active_animations(),
+                deadline: self
+                    .animations_enabled()
+                    .then(|| {
+                        self.expansions
+                            .iter()
+                            .map(|m| m.started_at + m.duration)
+                            .chain(self.copy_motions.iter().map(|m| m.started_at + m.duration))
+                            .chain(
+                                self.refresh_spin_started
+                                    .map(|start| start + REFRESH_FEEDBACK_DURATION),
+                            )
+                            .max()
+                    })
+                    .flatten(),
             }
             .into(),
         ];
@@ -2299,7 +2312,7 @@ fn peer_has_meta(peer: &Peer) -> bool {
 /// Wayland `RedrawRequested(now)` before `interface.draw()`, avoiding both the
 /// 1-vsync lag and multi-window double-ticks of `window::frames()`.
 struct FrameDriver {
-    active: bool,
+    deadline: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -2354,16 +2367,18 @@ impl cosmic::iced::advanced::Widget<Message, cosmic::Theme, cosmic::Renderer> fo
         shell: &mut cosmic::iced::advanced::Shell<'_, Message>,
         _viewport: &cosmic::iced::Rectangle,
     ) {
-        if !self.active {
+        let Some(deadline) = self.deadline else {
             return;
-        }
+        };
         if let Event::Window(cosmic::iced::window::Event::RedrawRequested(now)) = event {
             let state = tree.state.downcast_mut::<FrameDriverState>();
             if state.last_redraw != Some(*now) {
                 state.last_redraw = Some(*now);
                 shell.publish(Message::AnimationFrame(*now));
             }
-            shell.request_redraw();
+            if *now < deadline {
+                shell.request_redraw();
+            }
         }
     }
 }
@@ -3132,7 +3147,7 @@ mod tests {
         // Final frame after EXPANSION_DURATION settles animations and returns RedrawRequest::Wait.
         let t_end = t1 + EXPANSION_DURATION + Duration::from_millis(10);
         let ev_end = Event::Window(window::Event::RedrawRequested(t_end));
-        {
+        let final_request = {
             let mut shell = Shell::new(&mut msgs);
             el.as_widget_mut().update(
                 &mut tree,
@@ -3144,7 +3159,9 @@ mod tests {
                 &mut shell,
                 &viewport,
             );
-        }
+            shell.redraw_request()
+        };
+        assert_eq!(final_request, window::RedrawRequest::Wait);
         assert_eq!(msgs.len(), 1);
         drop(el);
         for msg in msgs.drain(..) {
