@@ -1,33 +1,20 @@
-# COSMIC Applet Template
+# Tailscale COSMIC Applet
 
-A template for developing applets for the COSMIC™ desktop environment using [libcosmic][libcosmic].
+COSMIC panel applet for the local Tailscale daemon. Shows connection state, local Tailscale IPs and peers; supports connecting and disconnecting this device.
 
-## Getting Started
+## Requirements
 
-> Please refer to the [COSMIC Trademark Policy][cosmic-trademark] when choosing a name for a project.
+- COSMIC desktop
+- Tailscale CLI and a running `tailscaled`
+- Rust toolchain and `just`
 
-To create an applet with this template, [install `cargo generate`][cargo-generate] and run:
+## Build and run
 
 ```sh
-cargo generate gh:pop-os/cosmic-applet-template
+just build-release
+just run
 ```
 
-A [justfile](./justfile) is included by default with common recipes used by other COSMIC projects. Install from [casey/just][just]
+Install system-wide with `sudo just install`. The applet invokes only fixed local CLI commands (`tailscale status --json`, `tailscale up`, `tailscale down`, `tailscale ping --c 1` for a single peer) and opens the fixed admin console URL with `xdg-open`. `up` may open the Tailscale authentication flow. `down` disconnects this device. No tailnet API key is used or stored.
 
-- `just` builds the applet with the default `just build-release` recipe
-- `just run` builds and runs the applet
-- `just install` installs the project into the system
-- `just vendor` creates a vendored tarball
-- `just build-vendored` compiles with vendored dependencies from that tarball
-- `just check` runs clippy on the project to check for linter warnings
-- `just check-json` can be used by IDEs that support LSP
-
-## Documentation
-
-Refer to the [libcosmic API documentation][api-docs] and [book][book] for help with building applets with [libcosmic][libcosmic].
-
-[api-docs]: https://pop-os.github.io/libcosmic/cosmic/
-[book]: https://pop-os.github.io/libcosmic-book/
-[cargo-generate]: https://cargo-generate.github.io/cargo-generate/installation.html
-[cosmic-trademark]: https://github.com/pop-os/cosmic-epoch/blob/master/TRADEMARK.md
-[just]: https://github.com/casey/just
+Status refreshes every five seconds. Peer status comes from Tailscale's CLI JSON output, whose format can change between versions.

@@ -1,10 +1,9 @@
 [package]
-name = "{{ project-name }}"
+name = "tailscale-cosmic-applet"
 version = "0.1.0"
 edition = "2024"
-license = "{{ license }}"
-description = "{{ description }}"
-repository = "{{ repository-url }}"
+license = "GPL-3.0-or-later"
+description = "COSMIC panel applet for local Tailscale connections"
 
 [build-dependencies]
 xdgen = "0.1"
@@ -13,6 +12,7 @@ xdgen = "0.1"
 i18n-embed-fl = "0.10"
 rust-embed = "8.11"
 tokio = { version = "1.52.0", features = ["full"] }
+serde_json = "1"
 
 [dependencies.i18n-embed]
 version = "0.16"
@@ -36,6 +36,11 @@ features = [
     # Windowing support for X11, Windows, Mac, & Redox
     "winit",
 ]
+
+# Optimize dependencies (tiny-skia, cosmic-text, resvg, libcosmic) in dev builds
+# so `just dev` renders animations at native 60 fps instead of ~14 fps on CPU.
+[profile.dev.package."*"]
+opt-level = 3
 
 # Uncomment to test a locally-cloned libcosmic
 # [patch.'https://github.com/pop-os/libcosmic']

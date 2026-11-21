@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name={{ project-name | title_case }}
-Comment={{ description }}
+Name=Tailscale COSMIC Applet
+Comment=Manage this device's Tailscale connection
 Type=Application
-Icon={{ appid }}
-Exec={{ project-name }} %F
+Icon=io.github.lucasbrt.TailscaleCosmicApplet
+Exec=tailscale-cosmic-applet
 Terminal=false
 StartupNotify=true
 Categories=COSMIC
