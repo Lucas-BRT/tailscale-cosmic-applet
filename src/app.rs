@@ -1619,7 +1619,7 @@ impl AppModel {
             .class(applet_menu_row_style(row_corner_radii(
                 theme.corner_radii.radius_s,
                 is_first,
-                is_last && !is_expanded,
+                is_last && !is_expanded && reveal <= 0.001,
             )))
             .width(Length::Fill)
             .padding([spacing.space_xs, spacing.space_s])
