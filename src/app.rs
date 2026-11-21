@@ -68,6 +68,7 @@ pub struct AppModel {
     expansions: Vec<DisclosureMotion>,
     copy_motions: Vec<CopyMotion>,
     refresh_spin_started: Option<Instant>,
+    refresh_spin_settle: Option<(Instant, f32)>,
     refresh_confirmed: bool,
     refresh_feedback_id: u64,
     frame_time: Option<Instant>,
@@ -95,6 +96,7 @@ impl Default for AppModel {
             expansions: Vec::new(),
             copy_motions: Vec::new(),
             refresh_spin_started: None,
+            refresh_spin_settle: None,
             refresh_confirmed: false,
             refresh_feedback_id: 0,
             frame_time: None,
@@ -112,6 +114,7 @@ pub enum PingState {
 const EXPANSION_DURATION: Duration = Duration::from_millis(240);
 const COPY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const REFRESH_FEEDBACK_DURATION: Duration = Duration::from_millis(420);
+const REFRESH_SETTLE_DURATION: Duration = Duration::from_millis(160);
 const REFRESH_CONFIRMED_HOLD: Duration = Duration::from_millis(550);
 const MIN_PEERS_FOR_SEARCH: usize = 3;
 
@@ -282,6 +285,7 @@ impl AppModel {
             self.expansions.clear();
             self.copy_motions.clear();
             self.refresh_spin_started = None;
+            self.refresh_spin_settle = None;
             self.frame_time = None;
         }
     }
@@ -460,29 +464,36 @@ impl AppModel {
         if !self.animations_enabled() {
             return 0.0;
         }
-        let Some(started_at) = self.refresh_spin_started else {
-            return 0.0;
-        };
-        let progress = now
-            .saturating_duration_since(started_at)
-            .div_duration_f32(REFRESH_FEEDBACK_DURATION)
-            .clamp(0.0, 1.0);
-        disclosure_ease(progress) * std::f32::consts::TAU
+        if let Some(started_at) = self.refresh_spin_started {
+            let turns = now
+                .saturating_duration_since(started_at)
+                .div_duration_f32(REFRESH_FEEDBACK_DURATION);
+            return turns.fract() * std::f32::consts::TAU;
+        }
+        if let Some((started_at, from)) = self.refresh_spin_settle {
+            let progress = now
+                .saturating_duration_since(started_at)
+                .div_duration_f32(REFRESH_SETTLE_DURATION)
+                .clamp(0.0, 1.0);
+            return from + (std::f32::consts::TAU - from) * disclosure_ease(progress);
+        }
+        0.0
     }
 
     fn has_active_animations(&self) -> bool {
         !self.expansions.is_empty()
             || !self.copy_motions.is_empty()
             || self.refresh_spin_started.is_some()
+            || self.refresh_spin_settle.is_some()
     }
 
     fn finish_animations_if_complete(&mut self, now: Instant) {
         self.expansions.retain(|motion| !motion.is_complete(now));
         self.copy_motions.retain(|motion| !motion.is_complete(now));
-        if let Some(started_at) = self.refresh_spin_started
-            && now.saturating_duration_since(started_at) >= REFRESH_FEEDBACK_DURATION
+        if let Some((started_at, _)) = self.refresh_spin_settle
+            && now.saturating_duration_since(started_at) >= REFRESH_SETTLE_DURATION
         {
-            self.refresh_spin_started = None;
+            self.refresh_spin_settle = None;
         }
         self.frame_time = self.has_active_animations().then_some(now);
     }
@@ -494,6 +505,7 @@ impl AppModel {
         self.expanded_peer = None;
         self.expansions.clear();
         self.refresh_spin_started = None;
+        self.refresh_spin_settle = None;
         self.refresh_confirmed = false;
         self.frame_time = None;
         self.search_query.clear();
@@ -629,6 +641,7 @@ impl AppModel {
             activity_bar,
             // Stable tree position before conditional banners/body so diffing preserves state.
             FrameDriver {
+                continuous: self.animations_enabled() && self.refresh_spin_started.is_some(),
                 deadline: self
                     .animations_enabled()
                     .then(|| {
@@ -637,8 +650,8 @@ impl AppModel {
                             .map(|m| m.started_at + m.duration)
                             .chain(self.copy_motions.iter().map(|m| m.started_at + m.duration))
                             .chain(
-                                self.refresh_spin_started
-                                    .map(|start| start + REFRESH_FEEDBACK_DURATION),
+                                self.refresh_spin_settle
+                                    .map(|(start, _)| start + REFRESH_SETTLE_DURATION),
                             )
                             .max()
                     })
@@ -2061,6 +2074,7 @@ impl cosmic::Application for AppModel {
                 if self.animations_enabled() {
                     let now = Instant::now();
                     self.refresh_spin_started = Some(now);
+                    self.refresh_spin_settle = None;
                     self.frame_time = Some(now);
                     self.refresh_confirmed = false;
                     return fetch;
@@ -2092,6 +2106,13 @@ impl cosmic::Application for AppModel {
                 // Reject stale async results so a slow poll never overwrites newer state.
                 if req_id != self.status_request_id {
                     return Task::none();
+                }
+                if self.refresh_spin_started.is_some() {
+                    let now = Instant::now();
+                    let angle = self.refresh_spin_radians(now);
+                    self.refresh_spin_started = None;
+                    self.refresh_spin_settle = Some((now, angle));
+                    self.frame_time = Some(now);
                 }
                 self.is_refreshing = false;
                 match result {
@@ -2312,6 +2333,7 @@ fn peer_has_meta(peer: &Peer) -> bool {
 /// Wayland `RedrawRequested(now)` before `interface.draw()`, avoiding both the
 /// 1-vsync lag and multi-window double-ticks of `window::frames()`.
 struct FrameDriver {
+    continuous: bool,
     deadline: Option<Instant>,
 }
 
@@ -2367,16 +2389,16 @@ impl cosmic::iced::advanced::Widget<Message, cosmic::Theme, cosmic::Renderer> fo
         shell: &mut cosmic::iced::advanced::Shell<'_, Message>,
         _viewport: &cosmic::iced::Rectangle,
     ) {
-        let Some(deadline) = self.deadline else {
+        if !self.continuous && self.deadline.is_none() {
             return;
-        };
+        }
         if let Event::Window(cosmic::iced::window::Event::RedrawRequested(now)) = event {
             let state = tree.state.downcast_mut::<FrameDriverState>();
             if state.last_redraw != Some(*now) {
                 state.last_redraw = Some(*now);
                 shell.publish(Message::AnimationFrame(*now));
             }
-            if *now < deadline {
+            if self.continuous || self.deadline.is_some_and(|deadline| *now < deadline) {
                 shell.request_redraw();
             }
         }
@@ -2892,6 +2914,27 @@ mod tests {
     }
 
     #[test]
+    fn refresh_spin_settles_only_after_matching_request_completes() {
+        let mut app = AppModel::default();
+        app.set_animations_enabled(true);
+        let _ = app.update(Message::Refresh);
+        let request_id = app.status_request_id;
+        let _ = app.update(Message::StatusLoaded(
+            request_id.wrapping_sub(1),
+            Err("stale".into()),
+        ));
+        assert!(app.refresh_spin_started.is_some());
+        let _ = app.update(Message::StatusLoaded(request_id, Err("failed".into())));
+        assert!(!app.is_refreshing);
+        assert!(app.refresh_spin_started.is_none());
+        let (started, _) = app
+            .refresh_spin_settle
+            .expect("settle starts on completion");
+        app.finish_animations_if_complete(started + super::REFRESH_SETTLE_DURATION);
+        assert!(app.refresh_spin_settle.is_none());
+    }
+
+    #[test]
     fn copy_crossfade_and_refresh_feedback_respect_motion_preference() {
         let mut app = AppModel::default();
         app.set_animations_enabled(true);
@@ -2918,12 +2961,17 @@ mod tests {
             0.0
         );
 
-        // Manual refresh spins once under motion ON.
+        // Manual refresh continues spinning while the request is in flight.
         let _ = app.update(Message::Refresh);
         assert!(app.refresh_spin_started.is_some());
         assert!(!app.refresh_confirmed);
-        let end_angle = app.refresh_spin_radians(Instant::now() + REFRESH_FEEDBACK_DURATION);
-        assert!((end_angle - std::f32::consts::TAU).abs() < 0.01);
+        let started = app.refresh_spin_started.unwrap();
+        app.finish_animations_if_complete(started + REFRESH_FEEDBACK_DURATION * 2);
+        assert!(app.refresh_spin_started.is_some());
+        let angle = app.refresh_spin_radians(
+            started + REFRESH_FEEDBACK_DURATION * 2 + REFRESH_FEEDBACK_DURATION / 4,
+        );
+        assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 0.01);
 
         // Switching to reduced motion clears in-flight motion cleanly.
         app.set_animations_enabled(false);
