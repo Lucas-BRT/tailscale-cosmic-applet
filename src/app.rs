@@ -1521,17 +1521,14 @@ impl AppModel {
         .spacing(0)
         .width(Length::Fill);
 
-        let target_height = self.drawer_target_height(&spacing, !meta_parts.is_empty());
-        let container = widget::container(inner).width(Length::Fill);
-        // Only clamp height while animating; settled drawers size naturally (WCAG 1.4.4).
-        if reveal < 0.999 {
-            container
-                .max_height((target_height * reveal).max(0.0))
+        MeasuredReveal {
+            content: widget::container(inner)
+                .width(Length::Fill)
                 .clip(true)
-                .into()
-        } else {
-            container.into()
+                .into(),
+            reveal,
         }
+        .into()
     }
 
     /// Single peer row with a smooth inline actions drawer.
@@ -2329,6 +2326,180 @@ fn peer_has_meta(peer: &Peer) -> bool {
     has_os || has_dns
 }
 
+/// Clips a drawer to a fraction of its measured natural height.
+struct MeasuredReveal<'a> {
+    content: Element<'a, Message>,
+    reveal: f32,
+}
+
+impl cosmic::iced::advanced::Widget<Message, cosmic::Theme, cosmic::Renderer>
+    for MeasuredReveal<'_>
+{
+    fn tag(&self) -> cosmic::iced::advanced::widget::tree::Tag {
+        self.content.as_widget().tag()
+    }
+    fn state(&self) -> cosmic::iced::advanced::widget::tree::State {
+        self.content.as_widget().state()
+    }
+    fn children(&self) -> Vec<cosmic::iced::advanced::widget::Tree> {
+        self.content.as_widget().children()
+    }
+    fn diff(&mut self, tree: &mut cosmic::iced::advanced::widget::Tree) {
+        self.content.as_widget_mut().diff(tree);
+    }
+    fn size(&self) -> cosmic::iced::Size<Length> {
+        cosmic::iced::Size::new(Length::Fill, Length::Shrink)
+    }
+    fn layout(
+        &mut self,
+        tree: &mut cosmic::iced::advanced::widget::Tree,
+        renderer: &cosmic::Renderer,
+        limits: &Limits,
+    ) -> cosmic::iced::advanced::layout::Node {
+        let child = self.content.as_widget_mut().layout(tree, renderer, limits);
+        let size = child.size();
+        cosmic::iced::advanced::layout::Node::with_children(
+            cosmic::iced::Size::new(size.width, size.height * self.reveal.clamp(0.0, 1.0)),
+            vec![child],
+        )
+    }
+    fn operate(
+        &mut self,
+        tree: &mut cosmic::iced::advanced::widget::Tree,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        renderer: &cosmic::Renderer,
+        operation: &mut dyn cosmic::iced::advanced::widget::Operation,
+    ) {
+        self.content.as_widget_mut().operate(
+            tree,
+            layout
+                .children()
+                .next()
+                .expect("drawer content")
+                .with_virtual_offset(layout.virtual_offset()),
+            renderer,
+            operation,
+        );
+    }
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut cosmic::iced::advanced::widget::Tree,
+        layout: cosmic::iced::advanced::Layout<'b>,
+        renderer: &cosmic::Renderer,
+        viewport: &cosmic::iced::Rectangle,
+        translation: cosmic::iced::Vector,
+    ) -> Option<
+        cosmic::iced::advanced::overlay::Element<'b, Message, cosmic::Theme, cosmic::Renderer>,
+    > {
+        if self.reveal < 0.999 {
+            return None;
+        }
+        self.content.as_widget_mut().overlay(
+            tree,
+            layout
+                .children()
+                .next()
+                .expect("drawer content")
+                .with_virtual_offset(layout.virtual_offset()),
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+    fn update(
+        &mut self,
+        tree: &mut cosmic::iced::advanced::widget::Tree,
+        event: &Event,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        cursor: cosmic::iced::mouse::Cursor,
+        renderer: &cosmic::Renderer,
+        clipboard: &mut dyn cosmic::iced::advanced::Clipboard,
+        shell: &mut cosmic::iced::advanced::Shell<'_, Message>,
+        viewport: &cosmic::iced::Rectangle,
+    ) {
+        if let Some(visible) = layout.bounds().intersection(viewport) {
+            let cursor = if cursor.is_over(visible) {
+                cursor
+            } else {
+                cosmic::iced::mouse::Cursor::Unavailable
+            };
+            self.content.as_widget_mut().update(
+                tree,
+                event,
+                layout
+                    .children()
+                    .next()
+                    .expect("drawer content")
+                    .with_virtual_offset(layout.virtual_offset()),
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                &visible,
+            );
+        }
+    }
+    fn draw(
+        &self,
+        tree: &cosmic::iced::advanced::widget::Tree,
+        renderer: &mut cosmic::Renderer,
+        theme: &cosmic::Theme,
+        style: &cosmic::iced::advanced::renderer::Style,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        cursor: cosmic::iced::mouse::Cursor,
+        viewport: &cosmic::iced::Rectangle,
+    ) {
+        if let Some(visible) = layout.bounds().intersection(viewport) {
+            use cosmic::iced::advanced::Renderer as _;
+            renderer.with_layer(visible, |renderer| {
+                self.content.as_widget().draw(
+                    tree,
+                    renderer,
+                    theme,
+                    style,
+                    layout
+                        .children()
+                        .next()
+                        .expect("drawer content")
+                        .with_virtual_offset(layout.virtual_offset()),
+                    cursor,
+                    &visible,
+                );
+            });
+        }
+    }
+    fn mouse_interaction(
+        &self,
+        tree: &cosmic::iced::advanced::widget::Tree,
+        layout: cosmic::iced::advanced::Layout<'_>,
+        cursor: cosmic::iced::mouse::Cursor,
+        viewport: &cosmic::iced::Rectangle,
+        renderer: &cosmic::Renderer,
+    ) -> cosmic::iced::mouse::Interaction {
+        layout.bounds().intersection(viewport).map_or(
+            cosmic::iced::mouse::Interaction::None,
+            |visible| {
+                self.content.as_widget().mouse_interaction(
+                    tree,
+                    layout
+                        .children()
+                        .next()
+                        .expect("drawer content")
+                        .with_virtual_offset(layout.virtual_offset()),
+                    cursor,
+                    &visible,
+                    renderer,
+                )
+            },
+        )
+    }
+}
+impl<'a> From<MeasuredReveal<'a>> for Element<'a, Message> {
+    fn from(value: MeasuredReveal<'a>) -> Self {
+        Self::new(value)
+    }
+}
+
 /// Zero-size leaf widget that drives popup animations synchronously on each
 /// Wayland `RedrawRequested(now)` before `interface.draw()`, avoiding both the
 /// 1-vsync lag and multi-window double-ticks of `window::frames()`.
@@ -3103,6 +3274,40 @@ mod tests {
         assert!(app.popup.is_none());
         let _ = app.update(Message::EscapePressed);
         assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn measured_reveal_uses_actual_wrapped_height() {
+        use cosmic::iced::advanced::widget::Tree;
+        use cosmic::iced::{Limits, Pixels, Size};
+        let renderer = cosmic::Renderer::new(cosmic::font::default(), Pixels(14.0));
+        let limits = Limits::new(Size::ZERO, Size::new(160.0, 800.0));
+        let content = "long metadata that wraps across several lines ".repeat(8);
+        let make = |reveal| -> super::Element<'_, Message> {
+            super::MeasuredReveal {
+                content: cosmic::widget::container(cosmic::widget::text(content.clone()))
+                    .width(super::Length::Fill)
+                    .into(),
+                reveal,
+            }
+            .into()
+        };
+        let mut full = make(1.0);
+        let mut full_tree = Tree::new(&full);
+        let full_height = full
+            .as_widget_mut()
+            .layout(&mut full_tree, &renderer, &limits)
+            .size()
+            .height;
+        let mut half = make(0.5);
+        let mut half_tree = Tree::new(&half);
+        let half_height = half
+            .as_widget_mut()
+            .layout(&mut half_tree, &renderer, &limits)
+            .size()
+            .height;
+        assert!(full_height > 50.0);
+        assert!((half_height * 2.0 - full_height).abs() < 0.01);
     }
 
     #[test]
