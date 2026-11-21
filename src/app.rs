@@ -3311,6 +3311,40 @@ mod tests {
     }
 
     #[test]
+    fn frame_driver_keeps_redrawing_during_an_unfinished_refresh() {
+        use cosmic::iced::advanced::{Layout, Shell, clipboard, widget::Tree};
+        use cosmic::iced::{Event, Limits, Pixels, Rectangle, Size, mouse, window};
+        let renderer = cosmic::Renderer::new(cosmic::font::default(), Pixels(14.0));
+        let viewport = Rectangle::with_size(Size::new(420.0, 680.0));
+        let mut app = AppModel::default();
+        app.set_animations_enabled(true);
+        let _ = app.update(Message::Refresh);
+        let started = app.refresh_spin_started.expect("refresh animation started");
+        let mut element = app.popup_view();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(Size::ZERO, viewport.size()),
+        );
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Window(window::Event::RedrawRequested(
+                started + REFRESH_FEEDBACK_DURATION * 2,
+            )),
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &renderer,
+            &mut clipboard::Null,
+            &mut shell,
+            &viewport,
+        );
+        assert_eq!(shell.redraw_request(), window::RedrawRequest::NextFrame);
+    }
+
+    #[test]
     fn frame_driver_drives_popup_redraws_and_settles_to_wait() {
         use cosmic::iced::advanced::{Layout, Shell, clipboard, widget::Tree};
         use cosmic::iced::{Event, Limits, Pixels, Rectangle, Size, mouse, window};
