@@ -51,6 +51,7 @@ pub struct AppModel {
     pub is_refreshing: bool,
     /// Value last copied to the clipboard, kept briefly to confirm the action.
     pub copied: Option<String>,
+    copy_request_id: u64,
     /// Latency checks by peer IP.
     pub pings: HashMap<String, PingState>,
     /// Currently expanded peer ID for actions and detailed metrics.
@@ -82,6 +83,7 @@ impl Default for AppModel {
             pending: None,
             is_refreshing: false,
             copied: None,
+            copy_request_id: 0,
             pings: HashMap::new(),
             expanded_peer: None,
             search_query: String::new(),
@@ -247,7 +249,7 @@ pub enum Message {
     SetConnected(bool),
     CommandFinished(Result<(), String>),
     Copy(String),
-    ClearCopied(String),
+    ClearCopied(String, u64),
     ClearRefreshConfirmed(u64),
     Ping(String),
     PingDone(String, Result<(u32, bool), String>),
@@ -1072,7 +1074,6 @@ impl AppModel {
         let mut row_index = 0;
 
         if !status.hostname.is_empty() {
-            let is_copied = self.copied.as_deref() == Some(&status.hostname);
             let mut identity = widget::column::with_capacity(2)
                 .spacing(2)
                 .push(self.body_strong(status.hostname.clone()));
@@ -1108,21 +1109,17 @@ impl AppModel {
                 )))
                 .padding([spacing.space_xxs, spacing.space_s])
                 .width(Length::Fill)
-                .on_press_maybe((!is_copied).then(|| Message::Copy(status.hostname.clone())));
+                .on_press(Message::Copy(status.hostname.clone()));
             row_index += 1;
 
-            if is_copied {
-                rows.push(host_button.into());
-            } else {
-                rows.push(
-                    widget::tooltip(
-                        host_button,
-                        self.caption_text(fl!("copy-name")),
-                        widget::tooltip::Position::Bottom,
-                    )
-                    .into(),
-                );
-            }
+            rows.push(
+                widget::tooltip(
+                    host_button,
+                    self.caption_text(fl!("copy-name")),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into(),
+            );
         }
 
         for ip in &status.ips {
@@ -1134,7 +1131,6 @@ impl AppModel {
             } else {
                 fl!("ipv4")
             };
-            let is_copied = self.copied.as_deref() == Some(ip.as_str());
 
             let ip_text_col = widget::column::with_capacity(2)
                 .spacing(1)
@@ -1162,21 +1158,17 @@ impl AppModel {
                 )))
                 .padding([spacing.space_xxs, spacing.space_s])
                 .width(Length::Fill)
-                .on_press_maybe((!is_copied).then(|| Message::Copy(ip.clone())));
+                .on_press(Message::Copy(ip.clone()));
             row_index += 1;
 
-            if is_copied {
-                rows.push(ip_button.into());
-            } else {
-                rows.push(
-                    widget::tooltip(
-                        ip_button,
-                        self.caption_text(fl!("copy-ip")),
-                        widget::tooltip::Position::Bottom,
-                    )
-                    .into(),
-                );
-            }
+            rows.push(
+                widget::tooltip(
+                    ip_button,
+                    self.caption_text(fl!("copy-ip")),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into(),
+            );
         }
 
         let card = widget::container(widget::column::with_children(rows).spacing(0))
@@ -1460,7 +1452,7 @@ impl AppModel {
             widget::button::custom(content)
                 .padding(0)
                 .class(faded_standard_button(content_alpha))
-                .on_press_maybe((!is_copied && enabled).then(|| Message::Copy(value.to_owned())))
+                .on_press_maybe(enabled.then(|| Message::Copy(value.to_owned())))
                 .into()
         };
 
@@ -2123,6 +2115,8 @@ impl cosmic::Application for AppModel {
             Message::TogglePopup => return self.toggle_popup(),
             Message::Copy(text) => {
                 let now = Instant::now();
+                self.copy_request_id = self.copy_request_id.wrapping_add(1);
+                let request_id = self.copy_request_id;
                 let prev = self.copied.clone().filter(|p| p != &text);
                 let prev_from = prev.as_deref().map(|p| self.copy_progress(p, now));
                 let next_from = self.copy_progress(&text, now);
@@ -2145,13 +2139,13 @@ impl cosmic::Application for AppModel {
                             tokio::time::sleep(Duration::from_millis(1600)).await;
                             text
                         },
-                        Message::ClearCopied,
+                        move |text| Message::ClearCopied(text, request_id),
                     )
                     .map(cosmic::Action::App),
                 ]);
             }
-            Message::ClearCopied(text) => {
-                if self.copied.as_ref() == Some(&text) {
+            Message::ClearCopied(text, request_id) => {
+                if self.copy_request_id == request_id && self.copied.as_ref() == Some(&text) {
                     let now = Instant::now();
                     let from = self.copy_progress(&text, now);
                     self.copied = None;
@@ -2868,6 +2862,19 @@ mod tests {
     }
 
     #[test]
+    fn repeated_copy_ignores_stale_clear_timer() {
+        let mut app = AppModel::default();
+        let value = "100.64.0.1".to_owned();
+        let _ = app.update(Message::Copy(value.clone()));
+        let old_id = app.copy_request_id;
+        let _ = app.update(Message::Copy(value.clone()));
+        let _ = app.update(Message::ClearCopied(value.clone(), old_id));
+        assert_eq!(app.copied.as_deref(), Some(value.as_str()));
+        let _ = app.update(Message::ClearCopied(value, app.copy_request_id));
+        assert!(app.copied.is_none());
+    }
+
+    #[test]
     fn copy_crossfade_and_refresh_feedback_respect_motion_preference() {
         let mut app = AppModel::default();
         app.set_animations_enabled(true);
@@ -2883,7 +2890,7 @@ mod tests {
         // After the 140 ms fade-in settles, ClearCopied animates 1.0 -> 0.0.
         app.copy_motions.clear();
 
-        let _ = app.update(Message::ClearCopied("100.64.0.1".to_owned()));
+        let _ = app.update(Message::ClearCopied("100.64.0.1".to_owned(), app.copy_request_id));
         assert!(app.copied.is_none());
         assert_eq!(app.copy_motions.len(), 1);
         assert_eq!(
