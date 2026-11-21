@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 
-exec cargo test --locked --workspace "$@"
+exec cargo nextest run --locked --workspace "$@"

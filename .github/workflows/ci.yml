@@ -54,5 +54,10 @@ jobs:
       - name: Run Clippy
         run: ./scripts/lint.sh
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2
+        with:
+          tool: nextest@0.9.149
+
       - name: Run tests
         run: ./scripts/test.sh

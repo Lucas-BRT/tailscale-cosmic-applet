@@ -88,7 +88,7 @@ build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
 
 # Run unit tests
 test *args:
-    cargo test {{args}}
+    ./scripts/test.sh {{args}}
 
 # Run clippy across all targets
 check *args:
