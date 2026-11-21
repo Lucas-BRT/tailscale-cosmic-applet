@@ -1032,7 +1032,7 @@ impl AppModel {
             .into()
     }
 
-    fn footer_view(&self, muted_color: Color) -> Element<'_, Message> {
+    fn footer_view(&self, _muted_color: Color) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let row = widget::row::with_children(vec![
             widget::icon::from_name("web-browser-symbolic")
@@ -1042,16 +1042,11 @@ impl AppModel {
             self.body_text(fl!("admin-console"))
                 .width(Length::Fill)
                 .into(),
-            widget::icon::from_name("go-next-symbolic")
-                .size(16)
-                .symbolic(true)
-                .into(),
         ])
         .spacing(spacing.space_xs)
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-        let _ = muted_color;
         widget::container(
             cosmic::applet::menu_button(row)
                 .class(applet_menu_row_style(footer_corner_radii(
@@ -1309,13 +1304,18 @@ impl AppModel {
         }
 
         match self.pings.get(&peer.ip) {
-            None => build_btn(
-                "network-transmit-receive-symbolic",
-                fl!("ping"),
-                default_text,
-                false,
-                Some(Message::Ping(peer.ip.clone())),
-            ),
+            None => widget::tooltip(
+                build_btn(
+                    "network-transmit-receive-symbolic",
+                    fl!("ping"),
+                    default_text,
+                    false,
+                    Some(Message::Ping(peer.ip.clone())),
+                ),
+                widget::text::caption(fl!("ping")),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
             Some(PingState::Pending) => {
                 let btn = build_btn(
                     "network-transmit-receive-symbolic",
