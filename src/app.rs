@@ -2205,6 +2205,8 @@ impl cosmic::Application for AppModel {
                     self.search_query.clear();
                 } else if let Some(peer_id) = self.expanded_peer.clone() {
                     self.toggle_peer_expansion(peer_id);
+                } else if self.popup.is_some() {
+                    return self.toggle_popup();
                 }
             }
             Message::SignIn => {
@@ -3014,6 +3016,18 @@ mod tests {
         let _ = app.update(Message::EscapePressed);
         assert!(app.search_query.is_empty());
         assert_eq!(app.filtered_peers(&peers).len(), 2);
+    }
+
+    #[test]
+    fn escape_closes_popup_when_search_and_drawer_are_clear() {
+        let mut app = AppModel {
+            popup: Some(cosmic::iced::window::Id::unique()),
+            ..Default::default()
+        };
+        let _ = app.update(Message::EscapePressed);
+        assert!(app.popup.is_none());
+        let _ = app.update(Message::EscapePressed);
+        assert!(app.popup.is_none());
     }
 
     #[test]
