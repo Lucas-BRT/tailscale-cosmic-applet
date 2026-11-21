@@ -2890,7 +2890,10 @@ mod tests {
         // After the 140 ms fade-in settles, ClearCopied animates 1.0 -> 0.0.
         app.copy_motions.clear();
 
-        let _ = app.update(Message::ClearCopied("100.64.0.1".to_owned(), app.copy_request_id));
+        let _ = app.update(Message::ClearCopied(
+            "100.64.0.1".to_owned(),
+            app.copy_request_id,
+        ));
         assert!(app.copied.is_none());
         assert_eq!(app.copy_motions.len(), 1);
         assert_eq!(
