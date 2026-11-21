@@ -49,10 +49,10 @@ jobs:
           shared-key: tailscale-cosmic-applet
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: ./scripts/fmt.sh
 
       - name: Run Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: ./scripts/lint.sh
 
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: ./scripts/test.sh

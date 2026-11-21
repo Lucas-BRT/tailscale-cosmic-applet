@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 
-cargo fmt --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
+root="$(git rev-parse --show-toplevel)"
+"$root/scripts/fmt.sh"
+"$root/scripts/lint.sh"

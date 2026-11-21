@@ -18,10 +18,10 @@ git config core.hooksPath .githooks
 - Local and CI checks must pass before pushing:
 
 ```sh
-cargo fmt --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
+./scripts/check.sh
 ```
+
+Individual scripts are in `scripts/` (`fmt.sh`, `lint.sh`, `test.sh`).
 
 ## UI Development
 
