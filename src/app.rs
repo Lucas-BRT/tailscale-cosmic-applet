@@ -917,7 +917,9 @@ impl AppModel {
 
         let retry_btn = widget::button::standard(fl!("retry"))
             .leading_icon(widget::icon::from_name("view-refresh-symbolic"))
-            .on_press(Message::Refresh);
+            .on_press_maybe(
+                (!self.is_refreshing && self.pending.is_none()).then_some(Message::Refresh),
+            );
 
         let content = widget::column::with_capacity(2)
             .spacing(spacing.space_xs)
@@ -952,7 +954,9 @@ impl AppModel {
 
         let sign_in_btn = widget::button::suggested(fl!("sign-in"))
             .leading_icon(widget::icon::from_name("web-browser-symbolic"))
-            .on_press(Message::SignIn);
+            .on_press_maybe(
+                (!self.is_refreshing && self.pending.is_none()).then_some(Message::SignIn),
+            );
 
         let content = widget::column::with_capacity(2)
             .spacing(spacing.space_xs)
@@ -2204,6 +2208,9 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::SignIn => {
+                if self.is_refreshing || self.pending.is_some() {
+                    return Task::none();
+                }
                 if let Some(url) = self
                     .status
                     .as_ref()
