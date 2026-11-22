@@ -1,4 +1,5 @@
 .cargo/
+.rupicola
 *.pdb
 **/*.rs.bk
 debug/
