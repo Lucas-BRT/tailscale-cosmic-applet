@@ -1,15 +1,18 @@
+# Task runner for tailscale-cosmic-applet. Run `just` to list recipes, `just help` for options.
+
+set shell := ['bash', '-euo', 'pipefail', '-c']
+
 name := 'tailscale-cosmic-applet'
 appid := 'io.github.lucasbrt.TailscaleCosmicApplet'
 rootdir := ''
 prefix := '/usr'
 local-prefix := env('HOME') / '.local'
+cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
 
 appdata := appid + '.metainfo.xml'
 desktop := appid + '.desktop'
 
-# Installation paths
 base-dir := absolute_path(clean(rootdir / prefix))
-cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
 metainfo-dst := base-dir / 'share' / 'metainfo' / appdata
 legacy-appdata-dst := base-dir / 'share' / 'appdata' / appdata
 bin-dst := base-dir / 'bin' / name
@@ -17,42 +20,66 @@ desktop-dst := base-dir / 'share' / 'applications' / desktop
 icon-dst := base-dir / 'share' / 'icons' / 'hicolor' / 'scalable' / 'apps' / appid + '.svg'
 icon-symbolic-dst := base-dir / 'share' / 'icons' / 'hicolor' / 'symbolic' / 'apps' / appid + '-symbolic.svg'
 
-# Aliases for fast dev workflows
-alias d := dev
-alias reinstall-dev := dev
-alias reinstall := reinstall-release
-alias reinstall-test := reinstall-release
-alias install-test := install-local
-alias uninstall-test := uninstall-local
 
-# Default recipe: build release
-default: build-release
+[private]
+default:
+    @just --list
 
-# --- Dev shortcuts (fast local iteration, no root needed) ---
+[group('help')]
+[doc('Show overridable variables and usage examples')]
+help:
+    #!/usr/bin/env sh
+    cat <<'HELP'
+    Variables (override with `just name=value <recipe>`):
+      prefix        install prefix for system install        (default: /usr)
+      rootdir       staging root prepended to prefix         (default: empty)
+      local-prefix  user install prefix                      (default: ~/.local)
+      cargo-target-dir  cargo target directory               (default: target)
 
-# Fast dev cycle: debug build, symlink into ~/.local, refresh assets, and restart applet
+    Extra arguments are forwarded to cargo, e.g.:
+      just build-release --features foo
+      just test -- some_test_name
+      just clippy --message-format=short
+
+    Typical workflows:
+      just dev                 debug build, link into ~/.local, restart applet
+      just install-local       release build, install into ~/.local
+      sudo just install        release build, install system-wide
+      just check               full pre-push gate (fmt, clippy, tests)
+    HELP
+
+# --- Development (no root, ~/.local) ---
+
+[group('dev')]
+[doc('Debug build, link into ~/.local, refresh assets and restart applet')]
 dev *args: (build-debug args)
-    just prefix="{{local-prefix}}" _install-dev
-    just restart
+    {{just_executable()}} prefix="{{local-prefix}}" _install-dev
+    {{just_executable()}} restart
 
-# Release dev cycle: release build, install into ~/.local, and restart applet
+[group('dev')]
+[doc('Release build, install into ~/.local and restart applet')]
 reinstall-release *args: (build-release args)
-    just prefix="{{local-prefix}}" install
-    just restart
+    {{just_executable()}} prefix="{{local-prefix}}" install
+    {{just_executable()}} restart
 
-# Build debug and link/install into ~/.local without restarting
+[group('dev')]
+[doc('Debug build and link into ~/.local without restarting')]
 install-dev *args: (build-debug args)
-    just prefix="{{local-prefix}}" _install-dev
+    {{just_executable()}} prefix="{{local-prefix}}" _install-dev
 
-# Build release and install into ~/.local without restarting
+[group('dev')]
+[doc('Release build and install into ~/.local without restarting')]
 install-local *args: (build-release args)
-    just prefix="{{local-prefix}}" install
+    {{just_executable()}} prefix="{{local-prefix}}" install
 
-# Remove local ~/.local installation
+[group('dev')]
+[doc('Remove the ~/.local installation')]
+[confirm('Remove the ~/.local installation? (y/N)')]
 uninstall-local:
-    just prefix="{{local-prefix}}" uninstall
+    {{just_executable()}} prefix="{{local-prefix}}" uninstall
 
-# Stop running applet process so cosmic-panel respawns it cleanly
+[group('dev')]
+[doc('Stop the running applet so cosmic-panel respawns it')]
 restart:
     #!/usr/bin/env sh
     set -eu
@@ -73,64 +100,154 @@ restart:
         echo "No running {{name}} process found."
     fi
 
-# --- Build, test & lint ---
+# --- Build ---
 
-# Compile with debug profile
+[group('build')]
+[doc('Compile with the debug profile')]
 build-debug *args:
     cargo build --bin {{name}} {{args}}
 
-# Compile with release profile
+[group('build')]
+[doc('Compile with the release profile')]
 build-release *args:
     cargo build --release --bin {{name}} {{args}}
 
-# Compile release profile with vendored dependencies
-build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
+[group('build')]
+[doc('Compile the release profile offline from vendor.tar')]
+build-vendored *args: vendor-extract
+    cargo build --release --frozen --offline --bin {{name}} {{args}}
 
-# Run unit tests
+[group('run')]
+[doc('Run the applet directly (release)')]
+run *args:
+    RUST_BACKTRACE=full cargo run --release --bin {{name}} {{args}}
+
+[group('run')]
+[doc('Run the applet directly (debug)')]
+run-debug *args:
+    RUST_BACKTRACE=full cargo run --bin {{name}} {{args}}
+
+# --- Quality ---
+
+[group('quality')]
+[doc('Run the full pre-push gate: fmt-check, lint, test (scripts/check.sh)')]
+check:
+    ./scripts/check.sh
+
+[group('quality')]
+[doc('Run unit tests via scripts/test.sh; extra args forwarded')]
 test *args:
     ./scripts/test.sh {{args}}
 
-# Run clippy across all targets
-check *args:
+[group('quality')]
+[doc('Run lint via scripts/lint.sh (clippy, -D warnings)')]
+lint *args:
+    ./scripts/lint.sh {{args}}
+
+[group('quality')]
+[doc('Clippy across all targets and features, with -D warnings')]
+clippy *args:
     cargo clippy --all-targets --all-features {{args}} -- -D warnings
 
-# Run clippy with JSON output
-check-json: (check '--message-format=json')
+[group('quality')]
+[doc('Clippy with JSON message output')]
+clippy-json: (clippy '--message-format=json')
 
-# Format Rust sources
-fmt:
-    cargo fmt
+[group('quality')]
+[doc('Format Rust sources in place')]
+fmt *args:
+    cargo fmt {{args}}
 
-# Run the applet directly (release)
-run *args:
-    env RUST_BACKTRACE=full cargo run --release --bin {{name}} {{args}}
+[group('quality')]
+[doc('Check formatting without writing (scripts/fmt.sh)')]
+fmt-check *args:
+    ./scripts/fmt.sh {{args}}
 
-# Run the applet directly (debug)
-run-debug *args:
-    env RUST_BACKTRACE=full cargo run --bin {{name}} {{args}}
+# --- System install (sudo) ---
 
-# --- System & staging installation ---
-
-# Install release binary and desktop assets to `prefix` (respects `rootdir`)
-install: _install-assets
+[group('install')]
+[doc('Install release binary and desktop assets to prefix (respects rootdir)')]
+install: _require-build _install-assets
     rm -f "{{bin-dst}}"
-    install -Dm0755 "{{ cargo-target-dir / 'release' / name }}" "{{bin-dst}}"
-    just prefix="{{prefix}}" rootdir="{{rootdir}}" _refresh-caches
+    install -Dm0755 "{{cargo-target-dir / 'release' / name}}" "{{bin-dst}}"
+    {{just_executable()}} prefix="{{prefix}}" rootdir="{{rootdir}}" _refresh-caches
 
-# Internal: install assets + symlink debug binary (avoids copying large debug binary on every dev rebuild)
+[group('install')]
+[doc('Remove installed files from prefix (respects rootdir)')]
+[confirm('Remove system-wide installed files? (y/N)')]
+uninstall:
+    rm -f "{{bin-dst}}" "{{desktop-dst}}" "{{metainfo-dst}}" "{{legacy-appdata-dst}}" "{{icon-dst}}" "{{icon-symbolic-dst}}"
+    {{just_executable()}} prefix="{{prefix}}" rootdir="{{rootdir}}" _refresh-caches
+
+# --- Packaging & release ---
+
+[group('release')]
+[doc('Vendor dependencies into vendor.tar')]
+vendor:
+    mkdir -p .cargo
+    cargo vendor --sync Cargo.toml | head -n -1 > .cargo/config.toml
+    echo 'directory = "vendor"' >> .cargo/config.toml
+    echo >> .cargo/config.toml
+    tar pcf vendor.tar vendor .cargo/config.toml
+    rm -rf .cargo vendor
+
+[group('release')]
+[doc('Extract vendor.tar into ./vendor')]
+vendor-extract:
+    rm -rf vendor
+    tar pxf vendor.tar
+
+[group('release')]
+[doc('Bump version in Cargo.toml, commit, and create annotated tag')]
+[confirm('Bump version, commit and tag? (y/N)')]
+tag version:
+    find . -type f -name Cargo.toml -exec sed -i '0,/^version/s/^version.*/version = \"{{version}}\"/' '{}' \; -exec git add '{}' \;
+    cargo check
+    cargo clean
+    git add Cargo.lock
+    git commit -m 'release: {{version}}'
+    git tag -a {{version}} -m ''
+
+# --- Clean ---
+
+[group('clean')]
+[doc('Run cargo clean')]
+clean:
+    cargo clean
+
+[group('clean')]
+[doc('Remove vendored dependencies')]
+clean-vendor:
+    rm -rf .cargo vendor vendor.tar
+
+[group('clean')]
+[doc('Run cargo clean and remove vendored dependencies')]
+clean-dist: clean clean-vendor
+
+# --- Internal helpers (hidden from the list) ---
+
+[private]
+_require-build:
+    #!/usr/bin/env sh
+    if [ ! -f "target/xdgen/app.desktop" ] || [ ! -f "{{cargo-target-dir / 'release' / name}}" ]; then
+        echo "Missing build artifacts. Run 'just build-release' as your user before 'sudo just install'." >&2
+        exit 1
+    fi
+
+[private]
 _install-dev: _install-assets
     mkdir -p "$(dirname '{{bin-dst}}')"
-    ln -sfn "{{ absolute_path(cargo-target-dir / 'debug' / name) }}" "{{bin-dst}}"
-    just prefix="{{prefix}}" rootdir="{{rootdir}}" _refresh-caches
+    ln -sfn "{{absolute_path(cargo-target-dir / 'debug' / name)}}" "{{bin-dst}}"
+    {{just_executable()}} prefix="{{prefix}}" rootdir="{{rootdir}}" _refresh-caches
 
-# Internal: install desktop entry, metainfo and icons
+[private]
 _install-assets:
     install -Dm0644 "target/xdgen/app.desktop" "{{desktop-dst}}"
     install -Dm0644 "target/xdgen/app.metainfo.xml" "{{metainfo-dst}}"
     install -Dm0644 "resources/icon.svg" "{{icon-dst}}"
     install -Dm0644 "resources/icon-symbolic.svg" "{{icon-symbolic-dst}}"
 
-# Internal: refresh desktop/icon caches when installing directly (not into staged rootdir)
+[private]
 _refresh-caches:
     #!/usr/bin/env sh
     if [ -n "{{rootdir}}" ]; then
@@ -142,44 +259,3 @@ _refresh-caches:
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database -q "{{base-dir}}/share/applications" 2>/dev/null || true
     fi
-
-# Uninstall installed files (including legacy appdata path if present)
-uninstall:
-    rm -f "{{bin-dst}}" "{{desktop-dst}}" "{{metainfo-dst}}" "{{legacy-appdata-dst}}" "{{icon-dst}}" "{{icon-symbolic-dst}}"
-    just prefix="{{prefix}}" rootdir="{{rootdir}}" _refresh-caches
-
-# --- Cleanup & packaging ---
-
-# Run `cargo clean`
-clean:
-    cargo clean
-
-# Remove vendored dependencies
-clean-vendor:
-    rm -rf .cargo vendor vendor.tar
-
-# `cargo clean` and remove vendored dependencies
-clean-dist: clean clean-vendor
-
-# Vendor dependencies locally into vendor.tar
-vendor:
-    mkdir -p .cargo
-    cargo vendor --sync Cargo.toml | head -n -1 > .cargo/config.toml
-    echo 'directory = "vendor"' >> .cargo/config.toml
-    echo >> .cargo/config.toml
-    tar pcf vendor.tar vendor .cargo/config.toml
-    rm -rf .cargo vendor
-
-# Extract vendored dependencies
-vendor-extract:
-    rm -rf vendor
-    tar pxf vendor.tar
-
-# Bump cargo version, create git commit, and create tag
-tag version:
-    find -type f -name Cargo.toml -exec sed -i '0,/^version/s/^version.*/version = \"{{version}}\"/' '{}' \; -exec git add '{}' \;
-    cargo check
-    cargo clean
-    git add Cargo.lock
-    git commit -m 'release: {{version}}'
-    git tag -a {{version}} -m ''
